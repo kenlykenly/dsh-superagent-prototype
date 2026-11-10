@@ -100,7 +100,7 @@ Both presets run with `danger-full-access` as the operator's OS user and read me
 
    Set the WeChat Source's **Bot WeChat CLI** to `wx` (or its absolute path) and, if several accounts exist, the **Account** to that account's ID or alias. If the daemon runs on another machine, save it with `wx config servers add` and select it in the CLI configuration the Source runs.
 
-   The Source reads the daemon's replayable event log. It starts at the daemon's current position and resumes from its retained cursor after a restart, so messages received while it was off are recovered while the daemon still holds them. A message that quotes another joins the quoted message's Thread; other messages start a Thread of their own. A Trigger carries the message's readable text, while an image, voice, video or file message appears as a short label such as `[Photo]`; the Source does not download the attachment.
+   The Source reads the daemon's replayable event log. It starts at the daemon's current position and resumes from its retained cursor after a restart, so messages received while it was off are recovered while the daemon still holds them. A message that quotes another joins the quoted message's Thread; other messages start a Thread of their own. A Trigger carries the message's readable text, while an image, voice, video or file message appears as a short label such as `[Photo]`; the Source does not download the attachment. Other messages in the Thread context come from WeChat's saved message list and carry its 160-character preview.
 
 ## Install
 
