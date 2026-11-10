@@ -10,3 +10,6 @@
 # Feishu is optional: uncomment to enable its Source, then set the bot's lark-cli on the Feishu Source.
 # - id: dsh-superagent-feishu
 #   disabled: false
+# WeChat is optional: uncomment to enable its Source, then set the bot's signed-in wx CLI on the WeChat Source.
+# - id: dsh-superagent-wechat
+#   disabled: false

@@ -143,7 +143,7 @@ export function TicketPage({ id }: { id: string }) {
     {ended && <Hint>{ended}</Hint>}
     {data.attention && <div className="dt-banner"><span className="dt-banner-label">{t('attentionPrefix')}</span><MarkdownLite
       text={data.attention.question} />
-      {channel && <div className="dt-banner-actions">
+      {channel?.url && <div className="dt-banner-actions">
         <ActionLink href={channel.url} icon="message">{t('answerIn', { source: valueLabel(t, 'source', channel.source) })}</ActionLink>
       </div>}</div>}
     {/* Ordinary progress stays in the Session/Channels; only a report that halted work (blocked/failed) is shown here. */}

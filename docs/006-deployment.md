@@ -6,7 +6,7 @@ Use this guide to install, configure and operate dsh-superagent. It covers accou
 
 - **A dedicated DeepSeek Harness profile**, called `superagent` in this guide. Create it from the Web profile template. It loads the bundle and serves its panel on `127.0.0.1`. Keep it separate from the profile you work in: the plugin changes process-wide `PATH` and git settings, and its process needs independent restarts and upgrades.
 - **An agent GitHub account.** The agent comments, pushes branches and opens pull requests as this account, through a GitHub CLI signed in only as that account.
-- **Optional:** a Feishu bot for chat requests.
+- **Optional:** a Feishu bot or a WeChat bot for chat requests.
 
 Plugin configuration holds the state directory and machine limits. Use the panel for everything else: Sources for the repository and accounts, Policy for allowed lists, and Execution for worker directories and commands.
 
@@ -21,10 +21,11 @@ Both presets run with `danger-full-access` as the operator's OS user and read me
 ## Prerequisites
 
 - Node.js 22.19+ or 24+, pnpm, git 2.32+, Python 3.8+ and tmux
-- GitHub CLI (`gh`) 2.48 or later. Source CLI fields must point to `gh` or `lark-cli` wrappers; the host relies on their subcommands and output formats.
+- GitHub CLI (`gh`) 2.48 or later. Source CLI fields must point to `gh`, `lark-cli` or `wx` wrappers; the host relies on their subcommands and output formats.
 - A repository on github.com; GitHub Enterprise Server is not supported. To create a checkout per Ticket, keep a local clone from which the prepare command can add worktrees. Install `git-lfs` if that repository uses Git LFS.
 - A model provider configured for DeepSeek Harness. dsh-superagent uses the profile's default model unless the Eval or Execution settings name another.
 - For Feishu: `lark-cli` (tested with 1.0.90) and a Feishu or Lark app with a bot
+- For WeChat: [`@agent-wechat/cli`](https://github.com/thisnick/agent-wechat) (`wx`) and a signed-in WeChat account. Its daemon runs on the host or on a host the CLI can reach
 
 ## Accounts
 
@@ -68,6 +69,39 @@ Both presets run with `danger-full-access` as the operator's OS user and read me
 
    Both configurations share the keychain entry for the app secret. To remove only the bot configuration, delete its directory; do not run `lark-cli config remove`, which would affect the shared secret.
 
+### WeChat bot (optional)
+
+1. Install Agent WeChat's CLI on a Linux host with glibc 2.36 or later, as the user that runs dsh-superagent, and keep its daemon running. Its npm launcher requires Node 24.16 or later; standalone release binaries need no Node:
+
+   ```sh
+   npm install -g @agent-wechat/cli
+   wx --json version
+   wx daemon start
+   wx daemon status --json
+   ```
+
+   The project's [install guide](https://thisnick.github.io/agent-wechat/setup/install/) covers release binaries and platforms. Its [connect guide](https://thisnick.github.io/agent-wechat/setup/connect/) covers the sign-in below.
+
+2. Create and sign in to a WeChat profile. A new profile starts without your old chats; on Linux, `--official` reads an existing WeChat for Linux profile in place, with the official app closed:
+
+   ```sh
+   wx accounts create --alias superagent
+   wx auth login
+   ```
+
+   Scan the QR code with WeChat and approve the login. The daemon reconnects on later starts until WeChat ends the session.
+
+3. Check the daemon and note the account ID:
+
+   ```sh
+   wx accounts list --json
+   wx messages list filehelper --limit 1 --json
+   ```
+
+   Set the WeChat Source's **Bot WeChat CLI** to `wx` (or its absolute path) and, if several accounts exist, the **Account** to that account's ID or alias. If the daemon runs on another machine, save it with `wx config servers add` and select it in the CLI configuration the Source runs.
+
+   The Source reads the daemon's replayable event log. It starts at the daemon's current position and resumes from its retained cursor after a restart, so messages received while it was off are recovered while the daemon still holds them. A message that quotes another joins the quoted message's Thread; other messages start a Thread of their own. A Trigger carries the message's readable text, while an image, voice, video or file message appears as a short label such as `[Photo]`; the Source does not download the attachment.
+
 ## Install
 
 Run this block once, on a machine that has no `superagent` profile yet:
@@ -88,7 +122,7 @@ Run the profile-creation command only for a new installation. If the profile alr
 
 ## Machine configuration
 
-Copy [examples/profile.cordis.patch.yml](../examples/profile.cordis.patch.yml) to `~/.dsh/profiles/superagent/cordis.patch.yml`, replacing that file, and replace every `<placeholder>`. For Feishu, also enable the `dsh-superagent-feishu` entry there. The `webserver` entry sets the panel's port.
+Copy [examples/profile.cordis.patch.yml](../examples/profile.cordis.patch.yml) to `~/.dsh/profiles/superagent/cordis.patch.yml`, replacing that file, and replace every `<placeholder>`. For Feishu, also enable the `dsh-superagent-feishu` entry there; for WeChat, the `dsh-superagent-wechat` entry. The `webserver` entry sets the panel's port.
 
 | Key | Required | Meaning |
 | --- | --- | --- |
@@ -144,8 +178,8 @@ Check dsh-superagent: run `scripts/dsh-superagent --profile superagent status` i
 
 Setup must succeed before polling or work starts. Overview lists missing requirements and links to their settings. A settings change runs setup again. If you fix something outside the application, such as CLI authentication, choose **Check again**.
 
-1. **Sources.** Set the GitHub repository (`owner/name`) and agent CLI, for example `/home/me/.local/bin/gh-agent`. Requests normally arrive through the agent account's notifications. A new Issue or comment mentioning the account arrives on the next poll; adding a mention by editing an existing Issue body does not. Post a new comment instead. For Feishu, set the bot CLI, chats, each chat's receive-all or mentions-only mode, and whether to receive direct messages.
-2. **Policy.** The two example rules can be edited or removed. Under **On each Source**, add the GitHub accounts and Feishu users who may ask for work; until a list has someone, no request can become a Ticket. With Feishu, a chat can be chosen to sync the list from, at startup and on **Sync now**.
+1. **Sources.** Set the GitHub repository (`owner/name`) and agent CLI, for example `/home/me/.local/bin/gh-agent`. Requests normally arrive through the agent account's notifications. A new Issue or comment mentioning the account arrives on the next poll; adding a mention by editing an existing Issue body does not. Post a new comment instead. For Feishu, set the bot CLI, chats, each chat's receive-all or mentions-only mode, and whether to receive direct messages. For WeChat, set the bot CLI, the account when the daemon has several, chats and each one's receive mode, whether to receive direct messages, and whether other chats are received when the bot is mentioned.
+2. **Policy.** The two example rules can be edited or removed. Under **On each Source**, add the GitHub accounts and Feishu users who may ask for work; until a list has someone, no request can become a Ticket. With Feishu or WeChat, a chat or group can be chosen to sync the list from, at startup and on **Sync now**.
 3. **Execution.** The directory root and a prepare command. To give each Ticket a checkout of the repository:
 
    ```sh
@@ -188,6 +222,7 @@ Health entries are grouped by responsibility:
 | `assessment`, `launch`, `delivery`, `relay`, `notice`, `reply` | Stored work described in [003 Execution](003-execution.md); delivery counts waiting work, while reply covers Channel messages |
 | `worker` | Executor Session event handling; appears after its first failure |
 | `github`, `feishu`, `history` | Source polling, events and history recovery |
+| `wechat` | The WeChat event consumer; an error means the daemon, its sign-in or the CLI needs attention |
 | `sync:<source id>` | Allowed-list synchronization |
 
 A refusal has a status and `error`, its English text:
@@ -199,8 +234,8 @@ A refusal has a status and `error`, its English text:
 
 The blocks:
 
-- `source:github`, `source:feishu`: `{"enabled": true, "config": {…}}`. GitHub's config has `repository` and `cli`, and the switches `observeIssues`, `observePulls`, `observeComments` and `observeCi`, off by default, which receive every new Issue, new pull request and comment in the repository and the default branch's CI; Feishu's has `cli`, `chats` as `[{"chatId": "oc_…", "name": "…", "listen": "mentions"}]` (or `"all"`), `directMessages`, and `otherChats` as `"none"` or `"mentions"`.
-- `policy`: `{"rules": […], "sources": {"github": {"allowed": [{"id": "<login>"}], "bots": [{"id": "dependabot[bot]"}]}, "feishu": {"allowed": [{"id": "ou_…", "name": "…"}], "syncChat": "oc_…", "admission": {"oc_…": {"unlistedAddressed": "explicit"}}}}}`. `bots` lists the bots whose messages may become inferred candidates. An `admission` row is keyed by chat id, `other` or `direct` for Feishu, and by `issues`, `pulls`, `comments` or `ci` for GitHub; an unset cell takes its default (see [002 Authorization](002-authorization.md)).
+- `source:github`, `source:feishu`, `source:wechat`: `{"enabled": true, "config": {…}}`. GitHub's config has `repository` and `cli`, and the switches `observeIssues`, `observePulls`, `observeComments` and `observeCi`, off by default, which receive every new Issue, new pull request and comment in the repository and the default branch's CI; Feishu's has `cli`, `chats` as `[{"chatId": "oc_…", "name": "…", "listen": "mentions"}]` (or `"all"`), `directMessages`, and `otherChats` as `"none"` or `"mentions"`. WeChat's has `cli`, an optional `account`, `chats` as `[{"id": "…@chatroom", "name": "…", "listen": "mentions"}]` (or `"all"`), `directMessages`, `otherChats` as `"none"` or `"mentions"`, and `readPageSize`.
+- `policy`: `{"rules": […], "sources": {"github": {"allowed": [{"id": "<login>"}], "bots": [{"id": "dependabot[bot]"}]}, "feishu": {"allowed": [{"id": "ou_…", "name": "…"}], "syncChat": "oc_…", "admission": {"oc_…": {"unlistedAddressed": "explicit"}}}, "wechat": {"allowed": [{"id": "wxid_…", "name": "…"}], "syncChat": "…@chatroom", "admission": {"…@chatroom": {"unlistedAddressed": "explicit"}}}}}`. `bots` lists the bots whose messages may become inferred candidates. An `admission` row is keyed by chat id, `other` or `direct` for Feishu and WeChat, and by `issues`, `pulls`, `comments` or `ci` for GitHub; an unset cell takes its default (see [002 Authorization](002-authorization.md)).
 - `eval`: `mode`, `timeoutSeconds` and `model`.
 - `executor`: `model`, `maxWorkers`, `directory`, `prepare` and `blockedCommands`. The processing pause is a setting of its own, `paused`, which `POST executor/pause` sets.
 
@@ -217,7 +252,7 @@ curl -s -X PUT -H 'x-orchestrator-request: 1' -H 'content-type: application/json
 
 Setup uses the DeepSeek Harness subprocess service, as worker shells do. It removes environment variables whose names contain KEY, PASSWORD, SECRET or TOKEN.
 
-Setup verifies the GitHub repository and the agent's push access, writes the worker environment, and checks that git uses only the agent credentials for github.com. A Feishu setup failure disables only the Feishu Source.
+Setup verifies the GitHub repository and the agent's push access, writes the worker environment, and checks that git uses only the agent credentials for github.com. A Feishu setup failure disables only the Feishu Source. The WeChat Source has no startup probe: its `wechat` health entry reports a missing CLI or a failing daemon instead.
 
 The process environment that setup writes:
 
@@ -228,7 +263,7 @@ A file in `worker-bin` or `worker-gitconfig` that dsh-superagent did not write s
 
 ## Try it
 
-From an allowed GitHub account, open an Issue or post a comment containing `@<agent login> <request>`. Within a polling interval (one minute by default), Overview should show a Ticket. The agent acknowledges the request, works in its own Session and directory, and delivers in the original conversation. For Feishu, mention the bot in a configured chat.
+From an allowed GitHub account, open an Issue or post a comment containing `@<agent login> <request>`. Within a polling interval (one minute by default), Overview should show a Ticket. The agent acknowledges the request, works in its own Session and directory, and delivers in the original conversation. For Feishu, mention the bot in a configured chat; for WeChat, mention the bot in a configured group or message it directly.
 
 ## Upgrade
 
@@ -263,6 +298,10 @@ Setup problems appear on the overview with a link to the fix, in the panel's lan
 | `The bot lark-cli allows user identities` | Point the Feishu Source at a bot-only configuration, as in Feishu bot above |
 | `The bot lark-cli does not work.` or `The bot identity of app … is …` | Check the configuration's app id and secret |
 | `The Feishu bot is not a member of the chat.` | Add the bot to the chat in the chat's settings; the next attempt succeeds |
+| `The Source is on, and its WeChat CLI is not set` | Set the WeChat Source's **Bot WeChat CLI** to `wx` or its absolute path |
+| `wechat` health reports the event watcher exited | Run `wx daemon status --json` and `wx auth status` as the dsh-superagent user; start the daemon or sign the account in again |
+| WeChat replies are shown as dropped (`channelGone`) | WeChat refused the send, for example because the chat no longer exists or the account cannot post there; check the chat and the account |
+| No WeChat messages arrive | Check that the Source is on, the daemon is running, the chat is listed or the bot was mentioned or messaged directly, and the sender is on the allowed list. A first start begins at the daemon's current event position and does not replay old messages |
 | `status` exits 2 | A part reports an error, which a restart does not fix: `errors` names each part, as listed under Management API, with its detail; each part clears its own entry once it works again |
 | `status` exits 3 | Setup waits: `setup` says what is missing, and the overview links to the setting that fixes it |
 | `status` exits 1 | The service does not run, runs twice, does not answer, or its runtime reports an error; the output and the newest log say which |
