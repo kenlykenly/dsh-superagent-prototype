@@ -35,6 +35,7 @@ const TEXT = {
   'source.github-issue': ['GitHub Issue', 'GitHub Issue'],
   'health.github': ['GitHub 来源', 'GitHub Source'],
   'health.feishu': ['飞书来源', 'Feishu Source'],
+  'health.wechat': ['微信来源', 'WeChat Source'],
   'health.history': ['飞书补收', 'Feishu recovery'],
   'health.runtime': ['dsh-superagent', 'dsh-superagent'],
   'health.models': ['模型服务', 'Model service'],
