@@ -586,7 +586,8 @@ describe('github source', () => {
     github(h, routes)
     // A read that failed for another reason than a missing Issue fails the round once every step ran.
     await expect(pollRound(h)).rejects.toThrow('#12: Error: gh: Bad Gateway (HTTP 502)')
-    expect(h.receive.mock.calls.map(([trigger]) => trigger.meta.number)).toEqual([13])
+    expect(h.receive.mock.calls.map(([trigger]) => [trigger.meta.number, trigger.meta.kind]))
+      .toEqual([[13, 'issue'], [13, 'conversation']])
     // The cursor moved together with the Issue it does not cover yet.
     expect(Date.parse(h.store.get<string>('github-since')!)).toBeGreaterThan(Date.parse('2026-09-08T00:00:00.000Z'))
     expect(h.store.get('github-retry')).toEqual({ 12: { since: '2026-09-08T00:00:00.000Z', pr: false, attempts: 1, failedAt: expect.any(String) } })
@@ -594,7 +595,8 @@ describe('github source', () => {
     Object.assign(routes, { notifications: [], 'issues/12': issue(12, { created_at: '2026-08-01T00:00:00Z' }),
       'issues/12/comments': [mention(2, 12, '2026-09-08T02:00:00Z')] })
     await pollRound(h)
-    expect(h.receive.mock.calls.map(([trigger]) => trigger.meta.number)).toEqual([13, 12])
+    expect(h.receive.mock.calls.map(([trigger]) => [trigger.meta.number, trigger.meta.kind]))
+      .toEqual([[13, 'issue'], [13, 'conversation'], [12, 'issue'], [12, 'conversation']])
     expect(h.store.get('github-retry')).toEqual({})
     expect(h.store.threads.get('github:12')!.meta).not.toHaveProperty('pollError')
     h.store.close()
@@ -629,7 +631,7 @@ describe('github source', () => {
       { created_at: '2026-08-01T00:00:00Z' }),
       'issues/12/comments': [comment, { body: 'no id' }] })
     await pollRound(h)
-    expect(h.receive.mock.calls.map(([trigger]) => trigger.text)).toEqual(['@agent-bot please fix'])
+    expect(h.receive.mock.calls.map(([trigger]) => trigger.text)).toEqual(['Login fails\n\ndetails', '@agent-bot please fix'])
     expect(h.health.github).toMatchObject({ state: 'ready', detail: '1 notifications; next poll ≥ 60s; 2 unreadable items skipped' })
     h.store.close()
   })
@@ -849,27 +851,30 @@ describe('github source', () => {
     expect(h.store.threads.get('github:12')!.meta).toMatchObject({ title: 'Login fails', label: '#12 Login fails' })
     h.store.close()
   })
-  it('takes in a comment on an earlier Issue from its notification, without the Issue body', async () => {
+  it('takes in an earlier Issue\'s body when its notification first appears, with the comment that notified it', async () => {
     const h = host()
     const url = 'https://github.com/acme/widgets/issues/12'
     const comment: GithubComment = { id: 5, body: '@agent-bot can you take this?', user: { login: 'alice', type: 'User' },
       html_url: `${url}#issuecomment-5`, created_at: '2026-09-09T00:00:00Z', updated_at: '2026-09-09T00:00:00Z' }
-    const { reads } = notify(h, [issue(12, { created_at: '2026-08-01T00:00:00Z' })], { 12: [comment] })
+    const earlier = issue(12, { created_at: '2026-08-01T00:00:00Z' })
+    const { reads } = notify(h, [earlier], { 12: [comment] })
     await pollRound(h)
-    const expected = commentTrigger(comment, { number: 12, isPr: false, url }, 'conversation', 'agent-bot')
-    expect(h.receive.mock.calls.map(([trigger]) => trigger)).toEqual([expected])
-    // An Issue has only its conversation; the comments are read since the notification cursor.
+    expect(h.receive.mock.calls.map(([trigger]) => trigger)).toEqual([issueTrigger(earlier, 'agent-bot'),
+      commentTrigger(comment, { number: 12, isPr: false, url }, 'conversation', 'agent-bot')])
+    // An Issue has only its conversation; the comments are still read since the cursor, which the body no longer uses.
     const since = encodeURIComponent('2026-09-08T00:00:00.000Z')
     expect(reads.filter(path => path.includes('/comments'))).toEqual([`issues/12/comments?per_page=100&since=${since}`])
     h.store.close()
   })
   it('keeps one body Trigger for an Issue that a later poll reads again', async () => {
     const h = host()
-    // Opened just before the poll, the Issue is still after the cursor the next poll reads from.
-    notify(h, [issue(12, { created_at: new Date(Date.now() - 1000).toISOString() })], {}, new Date(Date.now() - 60_000).toISOString())
+    // The notification is still read on the next poll, which does not bring the body it already brought once.
+    const { reads } = notify(h, [issue(12, { created_at: new Date(Date.now() - 1000).toISOString() })], {},
+      new Date(Date.now() - 60_000).toISOString())
     await pollRound(h)
     await pollRound(h)
-    expect(h.receive).toHaveBeenCalledTimes(2)
+    expect(h.receive).toHaveBeenCalledOnce()
+    expect(bare(reads).filter(path => path === 'issues/12')).toHaveLength(2)
     expect(h.store.read.threadTriggers('github:12', 10).map(trigger => trigger.id)).toEqual([key('github-issue', '12')])
     expect(h.store.decisions.byThread('github:12').map(decision => decision.triggerIds)).toEqual([[key('github-issue', '12')]])
     h.store.close()
@@ -900,12 +905,20 @@ describe('github source', () => {
     expect(h.store.read.threadTriggers('github:12', 10)).toEqual([stored])
     h.store.close()
   })
-  it('takes in an Issue body only when the Issue was opened since the cursor, not when an edit or a comment changed it', async () => {
+  it('takes in an Issue body when its notification first appears, and not on a later notification or body edit', async () => {
     const h = host()
-    // Whoever edits the body, its author would be the actor, so a mention added by an edit is not read.
-    const edited = issue(12, { created_at: '2026-08-01T00:00:00Z', updated_at: '2026-09-09T00:00:00Z',
+    // Opened before the cursor, the Issue's body enters with its first notification.
+    const earlier = issue(12, { created_at: '2026-08-01T00:00:00Z', updated_at: '2026-09-09T00:00:00Z',
       body: 'Login fails. @agent-bot can you look?' })
-    notify(h, [edited])
+    notify(h, [earlier])
+    await pollRound(h)
+    expect(h.receive).toHaveBeenCalledOnce()
+    expect(h.receive.mock.calls[0]![0]).toMatchObject({ id: key('github-issue', '12'), addressed: 'mention', at: '2026-08-01T00:00:00Z' })
+    // A later notification, updated by an edit or a comment, reads only what changed: its author would be the actor, so a
+    // mention added by an edit is not read again.
+    h.receive.mockClear()
+    notify(h, [{ ...earlier, updated_at: '2026-09-10T00:00:00Z', body: 'Login fails. @agent-bot can you look now?' }], {},
+      '2026-09-08T00:00:00.000Z')
     await pollRound(h)
     expect(h.receive).not.toHaveBeenCalled()
     h.store.close()
@@ -935,7 +948,9 @@ describe('github source', () => {
       return [comment]
     }
     await pollRound(h)
-    expect(h.receive).not.toHaveBeenCalled()
+    // The body entered before the Source was turned off; the comment read then stopped and moved no read position.
+    expect(h.receive).toHaveBeenCalledOnce()
+    expect(h.receive.mock.calls[0]![0]).toMatchObject({ id: key('github-issue', '12'), text: 'Login fails\n\ndetails' })
     expect(h.store.get('github-cursor:12')).toBeUndefined()
     expect(h.store.get('github-since')).toBe('2026-09-08T00:00:00.000Z')
     h.store.close()
