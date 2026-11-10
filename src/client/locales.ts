@@ -30,6 +30,7 @@ const TEXT = {
   'mode.observe': ['仅观察', 'Observe'],
   'mode.auto': ['自动接单', 'Auto'],
   'source.feishu': ['飞书', 'Feishu'],
+  'source.wechat': ['微信', 'WeChat'],
   'source.github': ['GitHub', 'GitHub'],
   'source.github-issue': ['GitHub Issue', 'GitHub Issue'],
   'health.github': ['GitHub 来源', 'GitHub Source'],
