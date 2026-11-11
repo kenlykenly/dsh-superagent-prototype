@@ -2,18 +2,20 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Engine, key, type Assessor, type Executor, type OutboundMessage, type Trigger } from '../src/core/index.ts'
 import { apply as applyWechat, SOURCE, wechatChannel, wechatKind, wechatText, wechatThreadId, wechatTrigger, wechatTriggerId }
   from '../src/sources/wechat.ts'
-import { applyEvent, CursorExpired } from '../src/sources/wechat-loops.ts'
+import { applyEvent, CursorExpired, heartbeat, watch } from '../src/sources/wechat-loops.ts'
+import { accountStatus, loginAccount } from '../src/sources/wechat-cli.ts'
 import { sendWechat } from '../src/sources/wechat-channel.ts'
 import { wechatThreadContext } from '../src/sources/wechat-read.ts'
 import { SourceRegistry } from '../src/sources/registry.ts'
 import { Store } from '../src/app/store.ts'
 import { Commands, CliError } from '../src/infra/commands.ts'
 import { HealthBoard } from '../src/infra/health.ts'
+import type { Health } from '../src/sources/host.ts'
 import { KV } from '../src/kv.ts'
 import { testDeployment } from './fixtures/deployment.ts'
 import { SettingsSchema, settingsPolicy } from '../src/policy.ts'
 import { sourceContextOf, type SourceContextDeps } from '../src/app/source-context.ts'
-import { mkdtempSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { WechatMessage } from '../src/sources/wechat.ts'
@@ -193,5 +195,138 @@ describe('wechat source', () => {
     // A partial roster would otherwise clear the list of everyone the CLI could not read.
     vi.spyOn(h.commands, 'run').mockResolvedValueOnce(JSON.stringify({ items: [{ displayName: 'No ID' }], nextCursor: null }))
     await expect(wechatKind.policy!.sync!.run(h, part, new AbortController().signal)).rejects.toThrow('incomplete group member list')
+  })
+  it('reads the account state and asks the daemon for a saved login', async () => {
+    const h = host()
+    const run = vi.spyOn(h.commands, 'run').mockResolvedValue(JSON.stringify({ alias: 'superagent', authenticated: true,
+      connection: 'online' }))
+    expect(await accountStatus(h.commands, { cli: '/bin/wx', account: 'superagent' })).toEqual({ account: 'superagent',
+      authenticated: true, connection: 'online', online: true })
+    expect(run).toHaveBeenCalledWith('/bin/wx', ['--json', '--account', 'superagent', 'auth', 'status'])
+    run.mockResolvedValue('{}')
+    await loginAccount(h.commands, { cli: '/bin/wx', account: 'superagent' })
+    // `--no-qr` keeps the retry on the saved login; WeChat then asks for confirmation on the account's phone.
+    expect(run).toHaveBeenLastCalledWith('/bin/wx', ['--json', '--account', 'superagent', 'auth', 'login', '--no-qr', '--timeout', '75'])
+  })
+  it('turns a silent account disconnect into an error while the watcher keeps running, and back to ready after recovery', async () => {
+    const h = host()
+    const reports: Health[] = []
+    vi.spyOn(h.ctx, 'report').mockImplementation((_entry, value) => { reports.push(value) })
+    const controller = new AbortController()
+    let clock = 1_000_000
+    let online = false
+    const login = vi.fn(async () => { online = true })
+    await heartbeat(h.ctx, { cli: '/bin/wx', account: 'bot' }, controller.signal, {
+      now: () => clock,
+      status: async () => ({ account: 'bot', authenticated: online, connection: online ? 'online' : 'disconnected', online }),
+      login,
+      pause: async ms => {
+        // The recovered heartbeat reports ready, then the test ends it on its next wait.
+        if (reports.some(report => report.state === 'ready')) controller.abort()
+        else clock += ms
+      },
+    })
+    expect(reports[0]).toMatchObject({ state: 'error' })
+    expect(reports[0]!.detail).toContain('WeChat account bot')
+    expect(reports[0]!.detail).toContain('disconnected')
+    expect(reports[0]!.detail).toContain('phone')
+    expect(reports.at(-1)).toMatchObject({ state: 'ready' })
+    expect(login).toHaveBeenCalledOnce()
+  })
+  it('retries the saved login on an exponential backoff, one attempt at a time, not on every heartbeat', async () => {
+    const h = host()
+    const controller = new AbortController()
+    let clock = 1_000_000
+    let checks = 0
+    let inFlight = 0
+    let most = 0
+    const attempts: number[] = []
+    await heartbeat(h.ctx, { cli: '/bin/wx', account: 'bot' }, controller.signal, {
+      now: () => clock,
+      status: async () => {
+        checks += 1
+        return { account: 'bot', authenticated: false, connection: 'disconnected', online: false }
+      },
+      login: async () => {
+        inFlight += 1
+        most = Math.max(most, inFlight)
+        await Promise.resolve()
+        attempts.push(clock)
+        inFlight -= 1
+        if (attempts.length === 4) controller.abort()
+      },
+      pause: async ms => { clock += ms },
+    })
+    // 30 s after the first attempt, then 60 s and 2 min, while the 45 s heartbeat keeps checking in between.
+    expect(attempts).toEqual([1_000_000, 1_030_000, 1_090_000, 1_210_000])
+    expect(most).toBe(1)
+    expect(checks).toBeGreaterThan(attempts.length)
+  })
+  it('keeps the event cursor across a reconnect, so resuming neither drops nor repeats a message', async () => {
+    const h = host()
+    const cursorKey = KV.wechat.cursor('bot')
+    h.store.set(cursorKey, '11')
+    vi.spyOn(h.commands, 'run').mockImplementation(async (_program, args) => JSON.stringify(message({ id: args[6]!,
+      serverId: args[6]!.replace('msg_', '90'), threadId: CHAT })))
+    const config = { cli: '/bin/wx', account: 'bot' }
+    await applyEvent(h.ctx, h.commands, config, cursorKey, event('12', { messageId: 'msg_12', threadId: CHAT }))
+    expect(h.receive).toHaveBeenCalledTimes(1)
+    expect(h.store.get(cursorKey)).toBe('12')
+    // A disconnect and its successful login must leave the retained cursor alone.
+    const controller = new AbortController()
+    let online = false
+    await heartbeat(h.ctx, config, controller.signal, {
+      now: () => 0,
+      status: async () => ({ account: 'bot', authenticated: online, connection: online ? 'online' : 'disconnected', online }),
+      login: async () => { online = true },
+      pause: async () => controller.abort(),
+    })
+    expect(h.store.get(cursorKey)).toBe('12')
+    // The reconnect resumes at that event; the Engine still recognizes the replayed Trigger as a duplicate.
+    await applyEvent(h.ctx, h.commands, config, cursorKey, event('12', { messageId: 'msg_12', threadId: CHAT }))
+    expect(await h.receive.mock.results.at(-1)!.value).toBe('duplicate')
+    expect(h.store.get(cursorKey)).toBe('12')
+    // A later event still arrives once, so the replay protection did not skip it: the duplicate was handed to the
+    // Engine and dropped there, while the new message reached it normally.
+    await applyEvent(h.ctx, h.commands, config, cursorKey, event('13', { messageId: 'msg_13', threadId: CHAT }))
+    expect(h.receive).toHaveBeenCalledTimes(3)
+    expect(await h.receive.mock.results.at(-1)!.value).not.toBe('duplicate')
+    expect(h.store.get(cursorKey)).toBe('13')
+  })
+  it('reports an error from the running message watch, which keeps its cursor for the resume', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'wechat-watch-'))
+    const log = join(dir, 'wx.log')
+    const script = join(dir, 'wx')
+    // A CLI whose watch process stays alive after printing one event, then answers `auth status` as disconnected.
+    writeFileSync(script, `#!/usr/bin/env node
+const fs = require('node:fs')
+const args = process.argv.slice(2)
+fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify(args) + '\\n')
+if (args.includes('watch')) {
+  process.stdout.write(JSON.stringify({ cursor: '12', kind: 'message.committed', data: { messageId: 'msg_12', threadId: 'team@chatroom' } }) + '\\n')
+  setInterval(() => {}, 60000)
+}
+`, { mode: 0o755 })
+    const h = host({}, { cli: script, account: 'bot' })
+    h.store.set(KV.wechat.cursor('bot'), '11')
+    // The heartbeat and the consumer build their own Commands via withSignal, so stub the prototype.
+    const run = vi.spyOn(Commands.prototype, 'run').mockImplementation(async (_program, args) => args.includes('auth')
+      ? JSON.stringify({ alias: 'superagent', authenticated: false, connection: 'disconnected' })
+      : JSON.stringify(message({ id: 'msg_12', serverId: '9012', threadId: CHAT })))
+    const controller = new AbortController()
+    const running = watch(h.ctx, controller.signal)
+    try {
+      await vi.waitFor(() => expect(h.health.wechat).toMatchObject({ state: 'error',
+        detail: expect.stringContaining('connection: disconnected') }))
+      await vi.waitFor(() => expect(h.receive).toHaveBeenCalledOnce())
+      await vi.waitFor(() => expect(h.store.get(KV.wechat.cursor('bot'))).toBe('12'))
+      // The watcher was started at the retained cursor and the reconnect did not move it.
+      expect(readFileSync(log, 'utf8')).toContain('"messages","watch","--after","11"')
+    } finally {
+      controller.abort()
+      await running
+      run.mockRestore()
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })
