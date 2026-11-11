@@ -29,7 +29,7 @@ export function TicketLine({ ticket, question, onChanged, context }: {
       </div>
       {/* Always render the actions container so every Ticket row keeps a uniform three-line height. */}
       <div className="dt-ticket-actions">{onChanged && <>
-        {answer && <ActionLink href={answer.url} icon="message">{t('answerIn', { source: valueLabel(t, 'source',
+        {answer?.url && <ActionLink href={answer.url} icon="message">{t('answerIn', { source: valueLabel(t, 'source',
           answer.source) })}</ActionLink>}
         {ticket.actions.retry && <ConfirmButton variant="outline" icon="refresh" label={t('retry')} title={t('retryTitle')}
           message={t('retryConfirm', { title: ticket.title })}

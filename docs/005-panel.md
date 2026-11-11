@@ -43,7 +43,7 @@ Ticket details show the originating Trigger, Decision and reason, scope and Poli
 
 ## Search
 
-The header search finds Triggers by text, id, Feishu message id or a stored link, such as a GitHub comment URL. A Feishu link missing from the original message becomes searchable only after the host reads it during the current process lifetime.
+The header search finds Triggers by text, id, Feishu message id, WeChat chat or user id, or a stored link, such as a GitHub comment URL. A Feishu link missing from the original message becomes searchable only after the host reads it during the current process lifetime.
 
 Search also finds Threads by references such as `#12` or a GitHub URL, and Tickets by title or a matching Thread.
 

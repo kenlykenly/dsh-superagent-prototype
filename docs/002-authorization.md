@@ -58,6 +58,7 @@ For an unlisted person, an explicit admission cell takes precedence even on a Th
 Each Source's Policy has an admission table. Its rows are receiving scopes:
 
 - **Feishu:** each configured chat, other chats the bot receives mentions from, and direct messages. Other chats are received only when **其他群** is set to **仅 @** on the Feishu card.
+- **WeChat:** each configured chat, other chats the bot receives mentions from, and direct messages. Other chats are received only when **其他会话** is set to **仅 @** on the WeChat card.
 - **GitHub:** new Issues, new pull requests, comments and the default branch's CI.
 
 A row has up to three cells. Each cell decides whether a message becomes an explicit request, an inferred candidate or nothing:
@@ -68,7 +69,7 @@ A row has up to three cells. Each cell decides whether a message becomes an expl
 | Not on the list, addressing the agent | explicit, inferred, ignore | ignore |
 | Not on the list, not addressing the agent | inferred, ignore | ignore |
 
-Cells for unaddressed messages are available only where the Source receives every message, such as a Feishu chat set to **全部消息** or a GitHub scope with its receive-all switch enabled. A CI result has no sender, so its row offers only the last cell. Bot messages use the bot list instead of these cells.
+Cells for unaddressed messages are available only where the Source receives every message, such as a Feishu or WeChat chat set to **全部消息** or a GitHub scope with its receive-all switch enabled. A CI result has no sender, so its row offers only the last cell. Bot messages use the bot list instead of these cells.
 
 Setting the unlisted-addressed cell to explicit lets anyone in that scope request work by mentioning the agent. This can be useful for a dedicated support chat. Inferred candidates still depend on the accept mode. Follow-ups normally bypass this table, except that an explicit cell still grants explicit strength.
 
@@ -76,7 +77,7 @@ The admission table is part of the Policy version. Weakening a cell does not imm
 
 ### Bots and automated reviewers
 
-The host recognizes GitHub Apps, logins ending in `[bot]`, and Feishu bots as bots. A Source can list bots such as `dependabot[bot]` whose messages may become inferred candidates. They must either address the agent or post in a scope that receives every message. They cannot make explicit requests or stop Tickets.
+The host recognizes GitHub Apps, logins ending in `[bot]`, and Feishu bots as bots, and treats WeChat official accounts as non-human senders. A Source can list bots such as `dependabot[bot]` whose messages may become inferred candidates. They must either address the agent or post in a scope that receives every message. They cannot make explicit requests or stop Tickets.
 
 An automated reviewer using an ordinary account counts as a person to the host. Its comments reach subscribed Tickets and generate follow-up notices. Team prompt text must identify such accounts as automated reviewers.
 

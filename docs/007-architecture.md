@@ -188,7 +188,7 @@ Sources extend the host through `SourceKind`, defined in `src/sources/kind.ts`. 
 
 Registry configuration methods include `kind`, `instances`, `instance`, `validate`, `validatePolicy`, `policyPart`, `channelAllowed`, `declarations`, `environments`, `find` and `scope`. `find` asks each kind that supports search.
 
-Generic code accesses Source behavior through the registry. `send(message, commands)` calls the kind's Channel and returns `sent`, `gone` or `waiting` if the kind is not installed. `link` resolves its Channel link. `threadContext` pairs a kind's reader with its configuration, or returns nothing when the kind has no reader. Invalid stored configuration disables the instance.
+Generic code accesses Source behavior through the registry. `send(message, commands)` calls the kind's Channel with the instance's saved configuration and returns `sent`, `gone` or `waiting` if the kind is not installed. `link` resolves its Channel link. `threadContext` pairs a kind's reader with its configuration, or returns nothing when the kind has no reader. Invalid stored configuration disables the instance.
 
 Plugins receive `SourceHost`: the registry and `context(kind)`. The kind itself uses a narrower `SourceContext`, built by `sourceContextOf` in `src/app/source-context.ts`.
 
@@ -249,7 +249,7 @@ Each model request binds the Session to the current prompt revision. The revisio
 | `src/app/tools/main.ts`, `src/app/tools/executor.ts` | Tool arguments of the main Session and the Executor Sessions into calls of the core classes, and their results into cards |
 | `src/app/http.ts`, `src/app/views/`, `src/app/api.ts` | HTTP requests into calls, and Store reads into the panel's views; `api.ts` types every route for the panel |
 | `src/app/resources.ts`, `src/app/links.ts`, `src/app/cards.ts` | Resource names into reads, source messages into links, records into compact cards for models |
-| `src/sources/github*.ts`, `src/sources/feishu*.ts`, `src/sources/poll.ts` | GitHub and Feishu payloads into Triggers and Thread facts, and messages into CLI calls |
+| `src/sources/github*.ts`, `src/sources/feishu*.ts`, `src/sources/wechat*.ts`, `src/sources/poll.ts` | GitHub, Feishu and WeChat payloads into Triggers and Thread facts, and messages into CLI calls |
 | `src/deployment.ts`, `src/setup.ts`, `src/infra/` | Setup probes and problems, CLI transport, the agent's process environment |
 
 ## Dependency rules
@@ -278,7 +278,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 
 - Outbox applies the Feishu chat word limit.
 - `src/app/links.ts` resolves Feishu message links and `repliedTo`. It and Runtime read settings with `feishuSettings`.
-- `src/app/resources.ts` reads the `feishu/` and `github/` originals; `src/app/cards.ts` uses `pullOf` for Ticket cards.
+- `src/app/resources.ts` reads the `feishu/` and `github/` originals; `src/app/cards.ts` uses `pullOf` for Ticket cards. The WeChat Source has no `wechat/` resources or built-in skill: agents read its Triggers and Thread context through the generic `trigger/` and `thread/` resources.
 - Runtime sends `pullEndNotices` for merged or closed Tickets.
 - Executor tools bind reported pull requests with `readPull` and `claimPull`, using the GitHub context exposed by Runtime.
 - MasterAssessor reads repository files with `readRepositoryPath`.
@@ -374,6 +374,12 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/sources/feishu-read.ts` | The `feishu/` reads of a Trigger's message, its root, parent and topic, and `feishuThreadContext`, which gives them to assessments with their images |
 | `src/sources/admission-context.ts` | The bounded window an assessment starts from: the first pages of a Trigger's Thread, read through its kind, and the messages around the Trigger |
 | `src/sources/feishu-image.ts` | Reads a Feishu message's image as an attachment for the assessing Session |
+| `src/sources/wechat.ts` | The WeChat kind and plugin entry, exported as `./wechat-watch` |
+| `src/sources/wechat-trigger.ts` | WeChat events and messages as Triggers, their Threads and Channel addresses |
+| `src/sources/wechat-loops.ts` | The WeChat event consumer: the replayable cursor, message intake and the chat-name loop |
+| `src/sources/wechat-channel.ts` | The WeChat Channel: idempotent text sends, `sent` or `gone` |
+| `src/sources/wechat-read.ts` | The WeChat Thread context: the chat around a message and the quoted message it answers |
+| `src/sources/wechat-cli.ts` | The `wx` CLI's JSON reads: event cursor, chat names, message pages and group members |
 | `src/client/index.tsx` | The client plugin entry: the sidebar entry, the main panel and the page in DeepSeek Harness's Plugin Manager |
 | `src/client/app.tsx` | The panel: header, search, glossary, tabs and the page of the current route |
 | `src/client/provider.tsx` | What every page reads from its host: copy, calls, navigation, notices, the state poll, and `restart`, which reads the state quickly while dsh-superagent restarts |
@@ -397,7 +403,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/client/locales.ts` | All copy in both languages, and the glossary of [001 Domain model](001-domain.md) |
 | `src/client/client.css`, `css.d.ts` | The panel's stylesheet, loaded as text |
 
-`src/sources/github.ts` and `src/sources/feishu.ts` are also the entries of the two Source plugins, built by `tsdown.config.ts` and exported in `package.json` as `./github-watch` and `./feishu-watch`. The bundle's `cordis.patch.yml` inserts the three plugins, with Feishu disabled.
+`src/sources/github.ts`, `src/sources/feishu.ts` and `src/sources/wechat.ts` are also the entries of the Source plugins, built by `tsdown.config.ts` and exported in `package.json` as `./github-watch`, `./feishu-watch` and `./wechat-watch`. The bundle's `cordis.patch.yml` inserts the four plugins, with Feishu and WeChat disabled.
 
 ## Tests
 
@@ -408,6 +414,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/policy.spec.ts` | Source scope, the gate, the admission table, Mandate revalidation, the Policy version, settings migrations and assessment outcomes |
 | `tests/registry.spec.ts` | `SourceRegistry`: instances, validation, Policy parts, Channels and Thread context |
 | `tests/sources.spec.ts` | The Feishu and GitHub Sources on a `SourceContext`: translation, polls and read positions, the pull request rules, health |
+| `tests/wechat.spec.ts` | The WeChat Source: translation, the event cursor and intake, sends, Thread context, Policy rows and the plugin |
 | `tests/commands.spec.ts` | CLI calls as the deployment's accounts, the Channels' answers, and repository-scoped GitHub calls |
 | `tests/feishu-read.spec.ts`, `tests/github-read.spec.ts` | Feishu and GitHub reads |
 | `tests/admission-context.spec.ts`, `tests/feishu-image.spec.ts` | The Thread window of assessments, and Feishu image reads |

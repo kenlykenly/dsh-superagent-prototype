@@ -12,7 +12,7 @@ import { feishuRef, feishuTime, feishuTrigger, HistoricalMessageSchema, historyE
   from './feishu-trigger.ts'
 import { health, type SourceContext } from './host.ts'
 import { KV } from '../kv.ts'
-import { cursorAt, POLL_HORIZON_MS, polled, pollThreads as pollEach } from './poll.ts'
+import { consumerRetry, cursorAt, POLL_HORIZON_MS, polled, pollThreads as pollEach } from './poll.ts'
 import type { FeishuConfig } from './feishu.ts'
 
 export const runFeishu = (ctx: SourceContext, signal: AbortSignal): Promise<unknown> =>
@@ -64,15 +64,13 @@ async function watch(ctx: SourceContext, signal: AbortSignal): Promise<void> {
     await delay(retry, undefined, { signal }).catch(() => {})
   }
 }
-/** Wait before restarting the event consumer: 1s after a run that stayed up for a minute, otherwise exponential backoff up to 60s. */
-export const consumerRetry = (previous: number | undefined, ranMs: number): number =>
-  previous === undefined || ranMs >= 60_000 ? 1000 : Math.min(previous * 2, 60_000)
+export { consumerRetry } from './poll.ts'
 async function consume(ctx: SourceContext, signal: AbortSignal): Promise<void> {
   const child = spawn(bot(ctx).cli, ['event', 'consume', 'im.message.receive_v1', '--as', 'bot'],
     { stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, LARKSUITE_CLI_NO_UPDATE_NOTIFIER: '1',
       LARKSUITE_CLI_NO_SKILLS_NOTIFIER: '1' } })
   const stdout = createInterface({ input: child.stdout }); const stderr = createInterface({ input: child.stderr })
-  let chain = Promise.resolve(); let diagnostic = ''; let ready = false
+  let chain = Promise.resolve(); let diagnostic = ''; let ready = false; let failed = false
   const stop = (): void => { child.stdin.end(); child.kill('SIGTERM') }
   signal.addEventListener('abort', stop, { once: true })
   const timeout = setTimeout(() => { diagnostic = 'Feishu event consumer did not become ready within 45 seconds'; stop() }, 45_000)
@@ -80,8 +78,9 @@ async function consume(ctx: SourceContext, signal: AbortSignal): Promise<void> {
     diagnostic = line.slice(0, 4000)
     if (line.startsWith('[event] ready')) {
       ready = true; clearTimeout(timeout)
-      ctx.report('feishu', { state: 'ready', detail: 'Listening for bot events', at: new Date().toISOString() })
-    } else if (/WARN|drop|error/.test(line)) ctx.report('feishu', { state: 'error', detail: diagnostic })
+      // A readiness line can arrive after an event line already failed; it must not clear that error.
+      if (!failed) ctx.report('feishu', { state: 'ready', detail: 'Listening for bot events', at: new Date().toISOString() })
+    } else if (/WARN|drop|error/.test(line)) { failed = true; ctx.report('feishu', { state: 'error', detail: diagnostic }) }
   })
   stdout.on('line', (line: string) => {
     chain = chain.then(async () => {
@@ -93,7 +92,7 @@ async function consume(ctx: SourceContext, signal: AbortSignal): Promise<void> {
       chats[String(trigger.meta.chatId)] = trigger.meta.direct === true
       ctx.state.set(KV.feishu.chats, chats)
       await receive(ctx, trigger)
-    }).catch(error => { ctx.report('feishu', { state: 'error', detail: String(error) }) })
+    }).catch(error => { failed = true; ctx.report('feishu', { state: 'error', detail: String(error) }) })
   })
   try {
     await new Promise<void>((resolve, reject) => {

@@ -12,6 +12,7 @@ export const HEALTH_TEXT = {
   setupPending: 'Waiting for the deployment check',
   sourceOff: 'Off',
   feishuCliUnset: 'The Source is on, and its bot lark-cli is not set',
+  wechatCliUnset: 'The Source is on, and its WeChat CLI is not set',
   feishuBotMissing: 'Waiting for the Feishu bot',
   pollFailures: '{count} consecutive failed polls; last: {error}',
 } as const
