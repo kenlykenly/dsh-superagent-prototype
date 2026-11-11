@@ -15,6 +15,34 @@ export async function wechatJson<T>(commands: Commands, config: WechatCliConfig,
   if (!config.cli) throw new Error('The WeChat Source has no CLI')
   return schema.parse(JSON.parse(await commands.run(config.cli, wechatArgs(config, ...args))))
 }
+/** The daemon's answer to `wx auth status`: whether the account still holds a WeChat session and how its connection is doing. */
+const AccountStatusSchema = z.looseObject({
+  alias: z.string().nullable().optional(),
+  id: z.string().nullable().optional(),
+  authenticated: z.boolean().optional(),
+  connection: z.string().optional(),
+})
+/** The selected account as the daemon reports it; `online` is true only while WeChat keeps the signed-in connection up. */
+export interface WechatAccountStatus { account: string; authenticated: boolean; connection: string; online: boolean }
+/**
+ * Reads the account's login and connection state. A watch process can stay alive while WeChat has already ended the
+ * session, so this is the only signal that the Source stopped receiving messages.
+ */
+export async function accountStatus(commands: Commands, config: WechatCliConfig): Promise<WechatAccountStatus> {
+  const status = await wechatJson(commands, config, ['auth', 'status'], AccountStatusSchema)
+  const authenticated = status.authenticated === true
+  const connection = status.connection ?? 'unknown'
+  return { account: config.account || status.alias || status.id || 'the WeChat account', authenticated, connection,
+    online: authenticated && connection === 'online' }
+}
+/**
+ * Asks the daemon to sign the account in again with its saved device login, which WeChat confirms on the account's
+ * phone and no QR code is needed. `--timeout` stays under Commands' subprocess limit so a pending confirmation cannot
+ * hold the caller forever; the caller retries with its own backoff.
+ */
+export async function loginAccount(commands: Commands, config: WechatCliConfig): Promise<void> {
+  await commands.run(config.cli, wechatArgs(config, 'auth', 'login', '--no-qr', '--timeout', '75'))
+}
 /** The daemon's current event position, taken from a list page instead of replaying the whole log on a first run. */
 export async function eventCursor(commands: Commands, config: WechatCliConfig): Promise<string> {
   const page = await wechatJson(commands, config, ['chats', 'list', '--limit', '1'], PageSchema)

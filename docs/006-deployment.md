@@ -102,6 +102,8 @@ Both presets run with `danger-full-access` as the operator's OS user and read me
 
    The Source reads the daemon's replayable event log. It starts at the daemon's current position and resumes from its retained cursor after a restart, so messages received while it was off are recovered while the daemon still holds them. A message that quotes another joins the quoted message's Thread; other messages start a Thread of their own. A Trigger carries the message's readable text, while an image, voice, video or file message appears as a short label such as `[Photo]`; the Source does not download the attachment. Other messages in the Thread context come from WeChat's saved message list and carry its 160-character preview.
 
+   If WeChat signs the account out while the daemon and its event watcher stay up, the Source notices within a minute: the `wechat` health entry becomes `error`, naming the account and its login and connection state, and its detail asks for the phone confirmation the saved login needs. It retries that login with an exponential backoff from 30 seconds up to 10 minutes, one attempt at a time. Messages the daemon keeps meanwhile are read from the retained cursor once the account is back, so they are neither lost nor processed twice.
+
 ## Install
 
 Run this block once, on a machine that has no `superagent` profile yet:

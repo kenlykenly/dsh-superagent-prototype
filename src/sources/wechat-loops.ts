@@ -6,14 +6,19 @@ import { z } from 'zod'
 import { threadKey, type Trigger } from '../core/index.ts'
 import { CliError, type Commands } from '../infra/commands.ts'
 import { KV } from '../kv.ts'
-import { eventCursor, readMessage, refreshWechatLabels, wechatArgs, type WechatCliConfig } from './wechat-cli.ts'
+import { eventCursor, accountStatus, loginAccount, readMessage, refreshWechatLabels, wechatArgs, type WechatAccountStatus, type WechatCliConfig }
+  from './wechat-cli.ts'
 import { CommittedSchema, EventSchema, SOURCE, wechatTrigger } from './wechat-trigger.ts'
 import { health, type SourceContext } from './host.ts'
-import { consumerRetry } from './poll.ts'
+import { consumerRetry, pause } from './poll.ts'
 import type { WechatConfig } from './wechat.ts'
 
 /** The daemon no longer retains the events after our cursor, so the consumer must resume from now. */
 class CursorExpired extends Error {}
+/** How often the heartbeat reads the account's login state; a watch process can stay alive after WeChat ended its session. */
+export const WECHAT_HEARTBEAT_MS = 45_000
+/** Waits before each saved-login retry: 30 s, 60 s, 2 min, 4 min, 8 min, then every 10 min. */
+export const WECHAT_RECONNECT_MS = [30_000, 60_000, 120_000, 240_000, 480_000, 600_000] as const
 export const runWechat = (ctx: SourceContext, signal: AbortSignal): Promise<unknown> =>
   Promise.allSettled([watch(ctx, signal), chatNamesLoop(ctx, signal)])
 const enabled = (ctx: SourceContext): WechatConfig | undefined => ctx.config<WechatConfig>(SOURCE)
@@ -58,8 +63,84 @@ export async function applyEvent(ctx: SourceContext, commands: Commands, config:
   await receive(ctx, trigger)
   ctx.state.set(cursorKey, event.cursor)
 }
+/** Pieces the heartbeat reads and waits through; tests substitute them to drive the schedule without real waits. */
+export interface WechatHeartbeatOptions {
+  interval?: number
+  retries?: readonly number[]
+  now?: () => number
+  status?: (commands: Commands, config: WechatCliConfig) => Promise<WechatAccountStatus>
+  login?: (commands: Commands, config: WechatCliConfig) => Promise<void>
+  pause?: (ms: number, signal: AbortSignal) => Promise<void>
+}
+const said = (error: unknown): string => (error instanceof Error ? error.message : String(error)).slice(0, 300)
+/**
+ * Watches the account's login state while the message watcher runs. WeChat can end the session without the watch
+ * process exiting, so a periodic `auth status` turns that silent outage into a health error. A saved login is retried
+ * with exponential backoff, one attempt at a time, and asks for the phone confirmation WeChat needs. The cursor is not
+ * touched here: a reconnect resumes from the same position, and the Engine's deterministic Trigger IDs drop replays.
+ */
+export async function heartbeat(ctx: SourceContext, config: WechatCliConfig, signal: AbortSignal,
+  options: WechatHeartbeatOptions = {}): Promise<void> {
+  const status = options.status ?? accountStatus
+  const login = options.login ?? loginAccount
+  const wait = options.pause ?? pause
+  const now = options.now ?? Date.now
+  const interval = options.interval ?? WECHAT_HEARTBEAT_MS
+  const retries = options.retries ?? WECHAT_RECONNECT_MS
+  const commands = ctx.commands.withSignal(signal)
+  let offline = false
+  let nextAttempt = -1
+  let step = 0
+  let failure = ''
+  const report = (state: 'ready' | 'error', detail: string): void => {
+    ctx.report(SOURCE, { state, detail, at: new Date().toISOString() })
+  }
+  const state = (value: WechatAccountStatus): string =>
+    `WeChat account ${value.account} is not online (authenticated: ${value.authenticated}, connection: ${value.connection})`
+  // The fix is always a person: WeChat's saved login pushes its confirmation to the account's phone.
+  const fix = (): string => {
+    const hint = 'Confirm the login on the account\'s phone when WeChat asks; if the phone shows nothing, run wx auth login on the daemon host.'
+    return failure ? ` The last attempt failed: ${failure}. ${hint}` : ` ${hint}`
+  }
+  while (!signal.aborted) {
+    let value: WechatAccountStatus
+    try { value = await status(commands, config) }
+    catch (error) {
+      if (signal.aborted) return
+      offline = true
+      report('error', `Cannot read the WeChat account status: ${said(error)}. Check that the Agent WeChat daemon is running; if WeChat signed the account out, confirm the login on the account's phone.`)
+      await wait(interval, signal)
+      continue
+    }
+    if (value.online) {
+      if (offline) report('ready', 'Listening for WeChat messages')
+      offline = false
+      nextAttempt = -1
+      step = 0
+      failure = ''
+      await wait(interval, signal)
+      continue
+    }
+    offline = true
+    if (nextAttempt < 0 || now() >= nextAttempt) {
+      report('error', `${state(value)}. Reconnecting with the saved login.${fix()}`)
+      try { await login(commands, config) }
+      catch (error) {
+        if (signal.aborted) return
+        failure = said(error)
+      }
+      nextAttempt = now() + retries[step]!
+      step = Math.min(step + 1, retries.length - 1)
+      // Read the state again at once so a login that just succeeded returns the Source to ready without another wait.
+      continue
+    }
+    const remaining = nextAttempt - now()
+    report('error', `${state(value)}. Reconnecting in ${Math.max(1, Math.ceil(remaining / 1000))} s.${fix()}`)
+    await wait(Math.min(interval, remaining), signal)
+  }
+}
 /** Runs the event consumer while the Source is enabled; disabling it stops the consumer within five seconds. */
-async function watch(ctx: SourceContext, signal: AbortSignal): Promise<void> {
+export async function watch(ctx: SourceContext, signal: AbortSignal): Promise<void> {
   await ctx.ready
   let retry: number | undefined
   while (!signal.aborted) {
@@ -82,10 +163,16 @@ async function watch(ctx: SourceContext, signal: AbortSignal): Promise<void> {
     }
     // Turning the Source off stops its consumer within five seconds, like the Feishu event consumer.
     const running = new AbortController()
+    const beating = new AbortController()
+    const stopBeat = (): void => { beating.abort() }
+    running.signal.addEventListener('abort', stopBeat, { once: true })
     const check = setInterval(() => { if (!enabled(ctx)) running.abort() }, 5000)
     const stop = (): void => { running.abort() }
     signal.addEventListener('abort', stop, { once: true })
     const began = Date.now()
+    // Report ready before the heartbeat starts so a startup disconnect replaces it with the error, never the reverse.
+    ctx.report(SOURCE, { state: 'ready', detail: 'Listening for WeChat messages', at: new Date().toISOString() })
+    const monitoring = heartbeat(ctx, config, beating.signal).catch(() => {})
     try { await consume(ctx, config, running.signal) }
     catch (error) {
       if (!running.signal.aborted) {
@@ -96,6 +183,9 @@ async function watch(ctx: SourceContext, signal: AbortSignal): Promise<void> {
     } finally {
       clearInterval(check)
       signal.removeEventListener('abort', stop)
+      running.signal.removeEventListener('abort', stopBeat)
+      beating.abort()
+      await monitoring
     }
     if (signal.aborted) break
     if (!enabled(ctx)) continue
@@ -127,7 +217,6 @@ export async function consume(ctx: SourceContext, config: WechatConfig, signal: 
   const stop = (): void => { child.kill('SIGTERM') }
   signal.addEventListener('abort', stop, { once: true })
   stderr.on('line', (line: string) => { diagnostic = line.slice(0, 4000) })
-  ctx.report(SOURCE, { state: 'ready', detail: 'Listening for WeChat messages', at: new Date().toISOString() })
   stdout.on('line', (line: string) => {
     chain = chain.then(() => applyEvent(ctx, commands, config, cursorKey, line))
       .catch((error: unknown) => { fatal ??= error; child.kill('SIGTERM') })
