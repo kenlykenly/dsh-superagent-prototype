@@ -343,16 +343,20 @@ async function pollNotifications(ctx: SourceContext, round: Round): Promise<{ co
 }
 async function readNotified(ctx: SourceContext, round: Round, number: number, item: Retry): Promise<void> {
   const { since } = item
+  // A notification's first appearance, not how far the polling cursor has moved, decides whether a body is new: a late
+  // notification still brings the body of an Issue or PR that was opened before the cursor passed it.
+  const first = !ctx.state.get(KV.github.notified(number))
   let isPr = item.pr
   if (!isPr) {
     const issue = await ctx.commands.withSignal(round.signal).api(IssueSchema, `issues/${number}`)
     // `issues/<n>` also returns PRs with `pull_request` set; handle them in the PR branch below.
     isPr = !!issue.pull_request
     if (!isPr) {
-      // An Issue opened by someone other than the agent since the cursor brings its body so a mention in it reaches the gate.
-      // A mention added by a later edit to the body is not read: only the author can be the actor of the body.
+      // The first notification to name an Issue by someone other than the agent brings its body so a mention in it reaches
+      // the gate. Later notifications read only what changed: a mention added by a later edit to the body is not read,
+      // because only the author can be the actor of the body.
       const { login } = ctx.deployment.github
-      const opened = Date.parse(issue.created_at) >= Date.parse(since) && !sameName(issue.user.login, login)
+      const opened = first && !sameName(issue.user.login, login)
       if (opened) await ctx.receive(issueTrigger(issue, login))
       await intakeComments(ctx, { number, isPr: false, url: issue.html_url }, since, round)
       nameThread(ctx, number, issue.title)
@@ -360,9 +364,10 @@ async function readNotified(ctx: SourceContext, round: Round, number: number, it
   }
   if (isPr) {
     const pr = await pull(ctx, round, number)
-    // Emit a PR description trigger for PRs opened since the cursor; its ID is the same as the one produced by the repository PR stream.
+    // The first notification to name a PR brings its description, as a new PR's stream does; its ID is the same as the one
+    // the repository PR stream produces.
     const { login } = ctx.deployment.github
-    if (pr.created_at && Date.parse(pr.created_at) >= Date.parse(since) && !sameName(pr.user.login, login)) {
+    if (first && pr.created_at && !sameName(pr.user.login, login)) {
       const opened = { number, title: pr.title ?? '', body: pr.body, user: pr.user, created_at: pr.created_at, html_url: pr.html_url }
       await ctx.receive(pullTrigger(opened, login))
     }
@@ -370,6 +375,7 @@ async function readNotified(ctx: SourceContext, round: Round, number: number, it
     if (pr.title) nameThread(ctx, number, pr.title)
   }
   ctx.state.set(KV.github.cursor(number), cursorAt(round.started))
+  if (first) ctx.state.set(KV.github.notified(number), true)
   ctx.threads.patch(`github:${number}`, { pollError: undefined })
 }
 /** Reads and observes a PR at most once per polling round. */
